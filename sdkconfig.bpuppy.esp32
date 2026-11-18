@@ -35,6 +35,14 @@ CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
 CONFIG_LOG_DEFAULT_LEVEL_ERROR=
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
+# ---- IRAM 压缩 (经典 ESP32 的 iram0_0_seg 只有 ~128KB) ----
+# 首次 CI 构建在链接期报: region `iram0_0_seg' overflowed by 1872 bytes。
+# 这两个优化默认 =y, 会把 WiFi 热路径放进 IRAM 换速度。台架不需要 WiFi 图传,
+# 让它们跑在 flash 里 (略慢), 释放的 IRAM 远多于缺的 1.8KB。
+# ⚠ 如果以后在 esp32 上真要用图传, 先别急着改回 y —— 先看链接期还剩多少 IRAM。
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+
 # ---- NimBLE 小包缓冲池 (KittenBlock 长命令) ----
 # 与 S3 同值。默认 12 块, KittenBlock 按 20 字节硬编码分包 + 回显通知会耗尽
 # → 长命令第 2 包起被丢 (见 AGENTS.md 蓝牙节)。每块 256 字节 ⇒ 净增 ~3KB 内部 RAM。
