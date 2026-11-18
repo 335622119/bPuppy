@@ -96,6 +96,14 @@ jobs:
           done
           echo "::endgroup::"
 
+          echo "::group::阶段 3.5 — 确认 sdkconfig 真的落地"
+          # 经验: 「写了 CONFIG_X 但没生效」在本仓库是反复出现的坑 (AGENTS.md 有专节)。
+          # 这里把与 IRAM / Flash / 分区表 / 蓝牙有关的实际值打出来, 免得靠猜。
+          idf.py -DBPUPPY_TARGET="$TARGET" reconfigure
+          grep -E 'CONFIG_(ESP_WIFI_IRAM_OPT|ESP_WIFI_RX_IRAM_OPT|ESPTOOLPY_FLASHSIZE|ESPTOOLPY_FLASHMODE|BT_ENABLED|BT_NIMBLE_ENABLED|PARTITION_TABLE_CUSTOM_FILENAME|ESP32_DEFAULT_CPU_FREQ)' \
+            build/sdkconfig || echo "(build/sdkconfig 里没有任何匹配项)"
+          echo "::endgroup::"
+
           echo "::group::阶段 4 — 编译 BPUPPY_TARGET=$TARGET"
           idf.py -DBPUPPY_TARGET="$TARGET" build
           echo "::endgroup::"

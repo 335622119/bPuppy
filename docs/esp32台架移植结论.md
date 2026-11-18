@@ -3,7 +3,8 @@
 > 对应 OpenSpec 变更: `esp32-wroom-32d-bench-bringup`
 > 目标硬件: ESP32-WROOM-32D（ESP32-D0WD，4MB Flash，无 PSRAM），飞线台架
 > 范围: **只跑运动**（舵机 + 步态 + IMU）
-> 状态: 代码与构建链已就位；**构建 / 烧录 / 实机验收尚未执行**（见文末「未完成项」）
+> 状态: 构建链已**在 GitHub Actions 上真编通**（S3 全绿；esp32 链接期 IRAM 溢出已修，见 §7）；
+> **烧录 / 实机验收尚未执行**（见文末「未完成项」）
 
 本文回答一个问题：**bPuppy 这套栈，哪些能原样搬到经典 ESP32，哪些必须改造，哪些不值得搬。**
 判定依据是芯片能力 + 启动路径的硬依赖，不是"试了能不能跑"。
@@ -100,32 +101,90 @@
 | `nvs`（两版相同） | `0x9000` / `0x6000` (24KB) |
 | 舵机 PWM | 50Hz，500–2500μs，LEDC `TIMER_0` |
 | 步态周期 | 50Hz（20ms/帧） |
+| **S3 产物（CI 实测）** | **1,759,632 字节** = 基准 +8,912 B（`bpuppy.board()` + 板级常量表） |
+| **esp32 首次链接** | `iram0_0_seg` **溢出 1872 字节**（关 WiFi IRAM 优化后解决，见 §7） |
 
 ---
 
 ## 5. 剩余风险（按"会不会让验证白做"排序）
 
-1. **移植层是否支持 esp32 目标** — `components/mr9you__micropython-helper` 的 `mpy.cmake`
-   若写死 esp32s3，整个方案卡在第一步。**这是必须先验证的一条**，所以任务顺序把它排在最前。
+1. ~~**移植层是否支持 esp32 目标**~~ — **已由 CI 实测排除**：`mpy_startup.c`、`mpy.cmake` 在
+   `IDF_TARGET=esp32` 下正常编译、正常链接（链接只卡 IRAM，与移植层无关）。见 §7。
 2. **Python GC 堆可能从 MB 级掉到 ~100KB** — S3 的 `SPIRAM_OCT` 很可能把 GC 堆放在 PSRAM。
    运动路径不受影响，但 KittenBlock 用户程序和任何大缓冲会受限。
    判据：开机 `micropython.mem_info()` 的 `GC: total`。**台架结论 ≠ 产品结论**，记下来。
-3. **内部 RAM 更紧** — 无 PSRAM 兜底，NimBLE 缓冲池 + 线程栈竞争更明显。
-   链接期若报 DRAM 不足，先把 `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT` 降到 16。
+3. **内部 RAM 更紧 —— 已兑现，且比预想更早发作**：不是 DRAM 而是 **IRAM**，
+   首次链接就溢出 1872 字节。处理见 §7.2。堆是否还够，要等实机 `mem_info()`。
 4. **扩展板 3 针口与丝印不一定一一对应** — 接舵机前必须用万用表通断 + `Pin.value()` 空跑确认，
    验证前不插舵机。
 5. **8 舵机电流远超板载 buck** — 5A 级峰值会让降压掉压、ESP32 复位。舵机电源从 2S 电池取，共地。
 
 ---
 
-## 6. 未完成项（需要在有 Docker + 硬件的机器上做）
+## 6. 未完成项
 
-以下任务**代码已就位，但没有执行过**，因为当前环境无 Docker、无 ESP-IDF、无网络、无硬件：
+### 6.1 已在 CI 上完成（不再是"待做"）
 
-- 两个目标各构建一次；确认 S3 产物大小仍为 1,750,720 字节（`board-support` spec 要求 S3 不受影响）
+- 两个目标各构建一次 —— 见 §7。S3 产物 **1,759,632 字节**（基准 1,750,720，+8,912 B，
+  来源是新增的 `bpuppy.board()` 与板级常量表）；S3 侧引脚/ADC/LED/UART 常量与变更前逐一相同。
+  ⚠ 不要用"字节数完全相等"当门禁：`bpuppy_version.c` 把 `__DATE__`/`__TIME__` 编进固件，
+  每次构建内容都不同，体积也会随代码小幅变化。
+
+### 6.2 仍必须在真板子上做
+
 - 烧录 esp32 固件，确认能进 REPL、不复位循环、横幅显示 `ESP32` / `Flash 4MB`
-- 记录 esp32 上 `micropython.mem_info()` 的 `GC: total`
+- 记录 esp32 上 `micropython.mem_info()` 的 `GC: total`（§5 第 2 条）
 - 万用表验证扩展板 3 针口 ↔ 丝印 GPIO 一致性（抽查 19 / 32 / 34）
 - 单路舵机方向与中位 → 8 路 + 三点标定迁移 → `poses.stand()` → `set_gait('go')` 连续 10 秒 → IMU 姿态方向
 
 验收阶梯与判据见 `openspec/changes/esp32-wroom-32d-bench-bringup/tasks.md` 的第 3、4 组。
+
+---
+
+## 7. CI 远程编译，以及它挖出的两个真问题
+
+`.github/workflows/firmware.yml`：两个目标矩阵并行、`espressif/idf:v5.1.2` 容器、ccache 缓存、
+三件产物（`micropython_bpuppy.bin` + `bootloader.bin` + `partition-table.bin`）上传。
+
+> 公开仓库 ⇒ 标准 runner 免费不限分钟。首次冷缓存约 3 分钟（含拉依赖），之后靠 ccache 更快。
+
+### 7.1 「干净 clone 编不出正式固件」—— 一直存在，只是没人从零开始过
+
+`CMakeLists.txt:41` 只认 `components/mr9you__micropython-helper`，而：
+
+- `components/` 被 `.gitignore` 忽略 —— `git clone` 下来没有这个目录；
+- 组件管理器下载的是 `managed_components/`，**仓库里没有任何一步把它搬过去**；
+- 找不到就走 `CMakeLists.txt:72` 的「模式 B」：`project(bPuppy_<target>)`，
+  编出来是个**没有自定义模块、没有 frozen 清单的空壳**，根本不是 `micropython_bpuppy.bin`；
+- `build.sh` 的补丁步骤在 `docker run` **之前**执行，补丁目标却在 `components/` 里 ⇒ 目录不存在直接 `exit 1`。
+
+以前一直在同一台机器上增量编，`components/` 是历史遗留目录顶着，所以从没暴露。
+CI 固定按这个顺序补上：`idf.py reconfigure`（拉依赖）→ `cp -r managed_components/<helper> components/`
+→ `rm -rf build`（清掉模式 B 缓存）→ 打补丁 → `idf.py build`。
+
+**代价**：这条流程目前写在 workflow 里，`build.sh` 本身仍有同样的缺口。
+换新电脑用 `build.sh` 时若 `components/` 不存在，会以"补丁应用失败"的形式报错退出（不是静默错误，尚可接受）。
+
+### 7.2 经典 ESP32 的 IRAM 装不下：`iram0_0_seg` 溢出 1872 字节
+
+首次 esp32 构建：所有 `.c/.cpp` 都编过了（含 `motion_task.cpp`、`camera_driver.c`、
+`mpy_startup.c`），只在最后链接 `micropython_bpuppy.elf` 时失败：
+
+```
+ld: section `.iram0.text' will not fit in region `iram0_0_seg'
+ld: region `iram0_0_seg' overflowed by 1872 bytes
+```
+
+**为什么 S3 不会遇到**：S3 的 IRAM 段大得多；经典 ESP32 的 `iram0_0_seg` 只有 ~128KB，
+而 WiFi 热路径默认被放进 IRAM（`CONFIG_ESP_WIFI_IRAM_OPT` / `CONFIG_ESP_WIFI_RX_IRAM_OPT` 默认 `=y`）。
+
+**处理**（`sdkconfig.bpuppy.esp32`）：把这两个优化关掉，WiFi 代码回到 flash 执行（略慢）。
+
+```ini
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+```
+
+台架本轮不用 WiFi 图传，性能代价无感。⚠ 若将来真要在 esp32 上开图传，
+**先看链接期还剩多少 IRAM** 再决定要不要改回 `y`；别直接调 `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT`
+（那是 DRAM 侧，治不了 IRAM 溢出）。
