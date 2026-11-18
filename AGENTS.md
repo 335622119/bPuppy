@@ -139,6 +139,45 @@ esptool --chip esp32 --port COM14 --baud 921600 write-flash `
 
 > `build.sh` 结尾会按当前目标自动打印这组命令，抄那两行最省事。
 
+#### 机器上没有 Python 怎么烧（免安装 esptool）
+
+`esptool` 官方发布**独立可执行包**，不需要装 Python / pip：
+
+1. 从 [esptool Releases](https://github.com/espressif/esptool/releases) 下载
+   `esptool-v5.6.0-windows-amd64.zip`（版本号会前进，认 `*windows-amd64.zip` 即可）
+2. 解压，把 `esptool.exe` 放到手边（不必进 PATH）
+3. 上面的命令把 `esptool` 换成 `.\esptool.exe` 就行：
+
+```powershell
+.\esptool.exe --chip esp32 --port COM14 --baud 921600 write-flash `
+  0x10000 build/micropython_bpuppy.bin
+```
+
+REPL 端同理不需要 Python：PuTTY / Tera Term 选 COM14、**115200**、8N1 即可
+（不要用 921600 —— 那是烧录速度，REPL 实测必须 115200 才干净）。
+
+> 这条是 2026-11 实测的卡点：一台只装了 Git + Visual Studio 的机器既没有 Docker 也没有
+> Python，`bash build.sh` 与 `esptool` 两条路同时断。**编译走 CI（见下节），烧录走独立 exe**，
+> 两条都不需要本机 Python。
+
+### GitHub Actions 远程编译（没有 Docker 的机器用这个）
+
+`.github/workflows/firmware.yml` 在 `espressif/idf:v5.1.2` 容器里并行编**两个目标**，
+产物三件（`micropython_bpuppy.bin` + `bootloader.bin` + `partition-table.bin`）挂到 run 页面。
+
+- **触发**: push 到 `master` / PR / 手动 `workflow_dispatch`
+- **取产物**: Actions → 对应 run → Artifacts → `firmware-esp32s3` / `firmware-esp32`
+- **耗时**: 首次冷缓存约 3 分钟（含拉依赖 + 编译 ~1350 步）；有 ccache 时 S3 约 1.5 分钟
+- **成本**: 公开仓库标准 runner 免费不限分钟；私有仓库吃 2000 分钟/月额度
+- **ccache**: 缓存在 `~/.ccache`，key 按目标 + 源文件哈希，改了 `drivers/` 会自动重编
+
+⚠ **CI 只替代"编得出来"**。烧录、万用表、舵机/步态/IMU 实测仍然必须在真板子上做。
+
+⚠ **干净 clone 的引导缺口**（CI 已在流程里补上，`build.sh` 本身没有）：`components/` 被
+`.gitignore` 忽略，组件管理器只下到 `managed_components/`，`CMakeLists.txt` 只认前者。
+新机器上直接 `bash build.sh` 会以"补丁应用失败"退出。详见
+[docs/esp32台架移植结论.md](docs/esp32台架移植结论.md) §7.1。
+
 ### 串口连接
 
 - 波特率: **115200**（实测 REPL 必须用 115200 才能读到干净输出；旧文档误标 921600）

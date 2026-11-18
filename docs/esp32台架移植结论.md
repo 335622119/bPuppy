@@ -185,6 +185,13 @@ CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 ```
 
+> ⚠ **实测这两个选项在经典 ESP32 上无效（2026-11-18）**：`build/sdkconfig` 确实变成了
+> `# CONFIG_ESP_WIFI_IRAM_OPT is not set` / `# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set`，
+> 但链接期溢出字节数**一字不差**（1872 → 1872）。
+> 原因是 ESP32 的 WiFi 是**预编译库**（`lib/esp32/lib*.a`），这两个 Kconfig 只对
+> **源码编译**的 WiFi 生效（换芯片才有意义）。所以别把它当解法 ——
+> 真正的 IRAM 归属靠 CI 的「链接失败诊断」步骤打出来（按归档统计 `.iram*` 段）。
+
 台架本轮不用 WiFi 图传，性能代价无感。⚠ 若将来真要在 esp32 上开图传，
 **先看链接期还剩多少 IRAM** 再决定要不要改回 `y`；别直接调 `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT`
 （那是 DRAM 侧，治不了 IRAM 溢出）。

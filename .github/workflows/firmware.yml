@@ -105,8 +105,23 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::阶段 4 — 编译 BPUPPY_TARGET=$TARGET"
-          idf.py -DBPUPPY_TARGET="$TARGET" build
-          echo "::endgroup::"
+          if idf.py -DBPUPPY_TARGET="$TARGET" build; then
+            echo "::endgroup::"
+          else
+            echo "::endgroup::"
+            echo "::group::链接失败诊断 — IRAM 归属"
+            # 教训: 经典 ESP32 的 CONFIG_ESP_WIFI_IRAM_OPT/RX_IRAM_OPT 对**预编译** WiFi 库无效,
+            # 关掉后 IRAM 用量一字未变。所以要看清 .iram* 段到底落在哪个归档里。
+            for a in $(find build/esp-idf -name '*.a' 2>/dev/null); do
+              n=$(xtensa-esp32-elf-size -A "$a" 2>/dev/null \
+                  | awk '/^\.iram/ {s+=$2} END {print s+0}')
+              [ "${n:-0}" -gt 0 ] && echo "$n  $a"
+            done | sort -rn | head -15
+            echo "--- iram0_0_seg 定义 ---"
+            grep -n -A3 'iram0_0_seg' build/esp-idf/esp_system/ld/memory.ld 2>/dev/null || echo "(未找到 memory.ld)"
+            echo "::endgroup::"
+            exit 1
+          fi
 
       - name: 产物报告
         shell: bash
