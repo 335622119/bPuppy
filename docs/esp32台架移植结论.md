@@ -20,7 +20,7 @@
 | 姿态脚本 `frozen/poses.py` | ✅ 可移植，零改动 | 只调 `bpuppy_servo` 与 `bpuppy_motion` |
 | 舵机 PWM `servo_driver.c` | ⚠ **需改造**（只改引脚表） | LEDC 在 ESP32 上同样有 8 通道 / LS mode；只有 GPIO 号是板级差异 |
 | IMU `imu_driver.c` | ✅ 可移植，零改动 | I2C0 走 14/21，与 S3 板相同；MPU6050/9250 与 SoC 无关 |
-| BLE `ble_driver.c` / `ble_stream.c` | ✅ 可移植（待实机确认） | NimBLE 两代都有；`CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24` 在 esp32 sdkconfig 里同值设置 |
+| BLE `ble_driver.c` / `ble_stream.c` | ❌ **可移植，但本轮关闭**（换 IRAM） | 见 §7.2：经典 ESP32 的 `iram0_0_seg` 只有 128KB，蓝牙控制器是预编译库、关不掉内部占用 |
 | 电池检测 `adc_driver.c` | ⚠ **需改造 → 本轮直接关闭** | 见 §2.1 |
 | WS2812 指示灯 `led_driver.c` | ❌ **不可移植 → 本轮关闭** | 见 §2.2 |
 | 语音 UART2 `frozen/voice.py` | ⚠ **需改造**（换脚 16/17） | GPIO20 在经典 ESP32 上不存在 |
@@ -30,7 +30,8 @@
 | KittenBlock 积木定义 | ✅ 无需改动 | 全部通过通道号与模块名说话，不涉及引脚 |
 
 一句话结论：**运动栈（舵机 + 步态 + IK + IMU）不依赖 S3 的任何独有特性**，
-唯二的真实障碍是"引脚编号对不上"和"WS2812 用了不存在的脚"。
+真实的障碍是"引脚编号对不上"、"WS2812 用了不存在的脚"，以及**经典 ESP32 的 128KB IRAM
+装不下蓝牙控制器**（§7.2）。
 
 ---
 
@@ -77,17 +78,19 @@
 | `drivers/servo_driver.c` | 8 个 `servo_init` 换成遍历 `BPUPPY_SERVO_PINS` | 引脚集中到 board_config |
 | `drivers/adc_driver.c` | `BPUPPY_ADC_ENABLE` 由 board_config 提供 | esp32 上必须为 0 |
 | `drivers/led_driver.c` | `LED_GPIO` 由 board_config 提供；`led_init` / `led_batt_start` 前置 `#if !BPUPPY_LED_ENABLE` 返回 | 否则 rmt_config 中止 = 上电 panic |
-| `drivers/bpuppy_version.c` | 新增 `bpuppy.board()` → `"esp32s3"` / `"esp32"` | frozen `.py` 看不到 Kconfig，需要一条运行时板型通道 |
+| `drivers/bpuppy_version.c` | 新增 `bpuppy.board()` → `"esp32s3"` / `"esp32"`；`bpuppy.ble_enabled()` | frozen `.py` 看不到 Kconfig，需要一条运行时的板型/编译开关通道 |
 | `frozen/voice.py` | UART2 引脚按 `bpuppy.board()` 选 | 语音在 esp32 上必须换到 16/17，S3 保持 19/20 |
-| `frozen/main.py` | 横幅打印目标与 Flash 容量 | 两个目标产物同名，需要一眼分辨 |
+| `drivers/micropython.cmake` | esp32 目标不编 `ble_*.c`、不定义 `BPUPPY_BLE_KEBLOCK` | 换 IRAM（§7.2） |
+| `frozen/main.py` | 横幅打印目标与 Flash 容量；按 `bpuppy.ble_enabled()` 跳过 BLE 启动 | 两个目标产物同名，需要一眼分辨；蓝牙关掉时要打日志而不是静默 ImportError |
 | `CMakeLists.txt` | `BPUPPY_TARGET` 选择板型 / 变体 / sdkconfig | 双目标并存 |
-| `sdkconfig.bpuppy.esp32` | **新增**。4MB DIO 40MHz + 4MB 分区表 + NimBLE 24 块 | 目标参数 |
+| `sdkconfig.bpuppy.esp32` | **新增**。4MB DIO 40MHz + 4MB 分区表 + `CONFIG_BT_ENABLED=n` | 目标参数；蓝牙整块关闭换 IRAM |
 | `partitions_esp32_4m.csv` | **新增**。nvs 同位同尺寸 | 4MB 装不下 S3 的 8MB/8MB 布局 |
 | `build.sh` | `--target` 参数、bootloader 偏移、旧 build 目录目标校验 | 经典 ESP32 引导在 `0x1000` |
 
 **没有改**：`motion_task.cpp`、`ik.c`、`motion_task_mpy.c`、`imu_driver.c`、
-`ble_*.c`、`pwm_ext_driver.c`、`camera_driver.c`、`frozen/poses.py`、
-`frozen/heading_*.py`、`kext-bpuppy/`（积木）、`partitions.csv`（S3 版）。
+`ble_*.c`（文件内容不动，esp32 目标下只是**不参与编译**）、`pwm_ext_driver.c`、
+`camera_driver.c`、`frozen/poses.py`、`frozen/heading_*.py`、`kext-bpuppy/`（积木）、
+`partitions.csv`（S3 版）。
 
 ---
 
@@ -114,7 +117,8 @@
    运动路径不受影响，但 KittenBlock 用户程序和任何大缓冲会受限。
    判据：开机 `micropython.mem_info()` 的 `GC: total`。**台架结论 ≠ 产品结论**，记下来。
 3. **内部 RAM 更紧 —— 已兑现，且比预想更早发作**：不是 DRAM 而是 **IRAM**，
-   首次链接就溢出 1872 字节。处理见 §7.2。堆是否还够，要等实机 `mem_info()`。
+   首次链接就溢出 1872 字节。解法是**关掉蓝牙**（§7.2）—— 蓝牙控制器是预编译库，
+   关不掉它的内部 IRAM 占用，只能整块不链。堆是否还够，要等实机 `mem_info()`。
 4. **扩展板 3 针口与丝印不一定一一对应** — 接舵机前必须用万用表通断 + `Pin.value()` 空跑确认，
    验证前不插舵机。
 5. **8 舵机电流远超板载 buck** — 5A 级峰值会让降压掉压、ESP32 复位。舵机电源从 2S 电池取，共地。
@@ -165,7 +169,7 @@ CI 固定按这个顺序补上：`idf.py reconfigure`（拉依赖）→ `cp -r m
 **代价**：这条流程目前写在 workflow 里，`build.sh` 本身仍有同样的缺口。
 换新电脑用 `build.sh` 时若 `components/` 不存在，会以"补丁应用失败"的形式报错退出（不是静默错误，尚可接受）。
 
-### 7.2 经典 ESP32 的 IRAM 装不下：`iram0_0_seg` 溢出 1872 字节
+### 7.2 经典 ESP32 的 IRAM 装不下：`iram0_0_seg` 溢出 1872 字节（已解决：关蓝牙）
 
 首次 esp32 构建：所有 `.c/.cpp` 都编过了（含 `motion_task.cpp`、`camera_driver.c`、
 `mpy_startup.c`），只在最后链接 `micropython_bpuppy.elf` 时失败：
@@ -176,22 +180,37 @@ ld: region `iram0_0_seg' overflowed by 1872 bytes
 ```
 
 **为什么 S3 不会遇到**：S3 的 IRAM 段大得多；经典 ESP32 的 `iram0_0_seg` 只有 ~128KB，
-而 WiFi 热路径默认被放进 IRAM（`CONFIG_ESP_WIFI_IRAM_OPT` / `CONFIG_ESP_WIFI_RX_IRAM_OPT` 默认 `=y`）。
+而 WiFi / 蓝牙的热路径默认被放进 IRAM。
 
-**处理**（`sdkconfig.bpuppy.esp32`）：把这两个优化关掉，WiFi 代码回到 flash 执行（略慢）。
+**走过的弯路（记下来，别再试）**：先关 WiFi 的 IRAM 优化
+（`CONFIG_ESP_WIFI_IRAM_OPT` / `CONFIG_ESP_WIFI_RX_IRAM_OPT`）。
+`build/sdkconfig` 确实变成了 `# ... is not set`，但**溢出字节一字不差**（1872 → 1872）——
+ESP32 的 WiFi 是**预编译库**（`lib/esp32/libcore.a` 等），这两个 Kconfig 只对
+**源码编译**的 WiFi 生效。所以它们现在保持 IDF 默认值，别再白降 WiFi 性能。
 
-```ini
-CONFIG_ESP_WIFI_IRAM_OPT=n
-CONFIG_ESP_WIFI_RX_IRAM_OPT=n
-```
+**真正的解法：关掉蓝牙**（用功能换 IRAM）。蓝牙控制器 `libbtdm_app` 是**预编译**的，
+`CONFIG_BT_*` 里没有任何选项能削减它内部的 IRAM 占用 —— 只能整块不链。
 
-> ⚠ **实测这两个选项在经典 ESP32 上无效（2026-11-18）**：`build/sdkconfig` 确实变成了
-> `# CONFIG_ESP_WIFI_IRAM_OPT is not set` / `# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set`，
-> 但链接期溢出字节数**一字不差**（1872 → 1872）。
-> 原因是 ESP32 的 WiFi 是**预编译库**（`lib/esp32/lib*.a`），这两个 Kconfig 只对
-> **源码编译**的 WiFi 生效（换芯片才有意义）。所以别把它当解法 ——
-> 真正的 IRAM 归属靠 CI 的「链接失败诊断」步骤打出来（按归档统计 `.iram*` 段）。
+三处联动，少一处就编不过：
 
-台架本轮不用 WiFi 图传，性能代价无感。⚠ 若将来真要在 esp32 上开图传，
-**先看链接期还剩多少 IRAM** 再决定要不要改回 `y`；别直接调 `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT`
+| 位置 | 改动 |
+|---|---|
+| `drivers/board_config.h` | `BPUPPY_BLE_ENABLE 0`（S3 分支是 `1`） |
+| `drivers/micropython.cmake` | `BPUPPY_TARGET=esp32` 时不编 `ble_driver.c` / `ble_driver_mpy.c` / `ble_stream.c` |
+| `sdkconfig.bpuppy.esp32` | `# CONFIG_BT_ENABLED is not set`（连预编译控制器一起不链） |
+| `frozen/main.py` | 先问 `bpuppy.ble_enabled()`，为 False 时打一行日志、跳过 `bpuppy_ble.start()` |
+
+`bpuppy.ble_enabled()`（`drivers/bpuppy_version.c`）是给 frozen `.py` 用的 ——
+它们看不到 C 宏，而 `import bpuppy_ble` 在关闭后会直接 ImportError，
+不给这个查询就只能 `except: pass` 静默吞掉，看串口的人会误以为"蓝牙有故障"。
+
+**代价（已接受）**：台架只能用 USB 串口（COM，115200）控制，KittenBlock 蓝牙连不上。
+`espressif/idf` 链接日志里 `libbt.a` + `libbtdm_app` 整块消失，余量远大于缺的 1872 字节，
+后续加功能不会立刻再爆。**S3 现网固件完全不受影响**（`sdkconfig.bpuppy` 不动）。
+
+> 也确认过：`drivers/` 里**没有任何** `IRAM_ATTR` / `.iram1` 段，我们自己不占 IRAM ——
+> 所以解法只能在配置层，改不了业务代码。
+
+⚠ 若将来真要在 esp32 上开图传或蓝牙，**先看链接期还剩多少 IRAM**（CI 的
+「链接失败诊断」会按归档列出 `.iram*`）；别去调 `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT`
 （那是 DRAM 侧，治不了 IRAM 溢出）。

@@ -305,6 +305,7 @@ OpenSpec 变更: `esp32-wroom-32d-bench-bringup`；结论清单见
 | 电池 ADC | `BPUPPY_ADC_ENABLE=0` | S3 的电池脚 GPIO3 在这颗芯片上是 UART0 RX；且标定系数必须在目标板重测 |
 | WS2812 指示灯 | `BPUPPY_LED_ENABLE=0` | 原 GPIO48 **超出 0~39 范围**，`rmt_config` 会 `ESP_ERROR_CHECK` 中止 = 上电 panic |
 | 语音 UART2 | TX=16 / RX=17 | GPIO20 在经典 ESP32 上不存在 |
+| 蓝牙 (BLE) | `BPUPPY_BLE_ENABLE=0` + `CONFIG_BT_ENABLED=n` | **只为 IRAM**：`iram0_0_seg` 只有 128KB，而蓝牙控制器是预编译库，占用的 IRAM 削减不掉。台架改用 USB 串口 115200 控制。详见 [docs/esp32台架移植结论.md](docs/esp32台架移植结论.md) §7.2 |
 | IMU | **不变** 14/21 | 三个 frozen 模块写死了 14/21，不动就不用改 Python |
 | 摄像头 / WiFi 图传 / PWM_EXT | 编译进去但不初始化 | 本轮不做；`/camera_on.py`、`/pwm_ext_on.py` 不建就不跑 |
 

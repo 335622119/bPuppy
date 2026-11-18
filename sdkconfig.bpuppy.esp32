@@ -2,10 +2,11 @@
 # bPuppy ESP32 (经典) — 覆盖板级默认值
 # 目标: ESP32-WROOM-32D (4MB Flash, 无 PSRAM) — 台架验证
 #
-# 与 sdkconfig.bpuppy (S3/16MB) 的差异就三处:
+# 与 sdkconfig.bpuppy (S3/16MB) 的差异:
 #   Flash  4MB DIO 40MHz   (S3 是 16MB QIO 80MHz)
 #   分区表 4MB 版本         (S3 是 16MB 版本)
 #   相机   **不开** PSRAM DMA (本芯片没有 PSRAM; 相机本轮也不初始化)
+#   蓝牙   **整块关闭**      (IRAM 只有 128KB, 见文末「蓝牙: 关闭」)
 #
 # ⚠ ESP32 上没有 PSRAM / USB-OTG / LCD_CAM / USB-JTAG —— 相关 CONFIG 一律不写,
 #   写了也只会被忽略, 反而让人以为它生效了。
@@ -27,7 +28,7 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_esp32_4m.csv"
 
 # ---- 主频 240MHz ----
-# 默认 160MHz。50Hz 步态循环 + BLE 同时跑, 留点余量; 若实测电流/发热有顾虑可回 160。
+# 默认 160MHz。50Hz 步态循环留点余量; 若实测电流/发热有顾虑可回 160。
 CONFIG_ESP32_DEFAULT_CPU_FREQ_160=
 CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
 
@@ -35,19 +36,19 @@ CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
 CONFIG_LOG_DEFAULT_LEVEL_ERROR=
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# ---- IRAM 压缩 (经典 ESP32 的 iram0_0_seg 只有 ~128KB) ----
-# 首次 CI 构建在链接期报: region `iram0_0_seg' overflowed by 1872 bytes。
-# 这两个优化默认 =y, 会把 WiFi 热路径放进 IRAM 换速度。台架不需要 WiFi 图传,
-# 让它们跑在 flash 里 (略慢), 释放的 IRAM 远多于缺的 1.8KB。
-# ⚠ 如果以后在 esp32 上真要用图传, 先别急着改回 y —— 先看链接期还剩多少 IRAM。
-CONFIG_ESP_WIFI_IRAM_OPT=n
-CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# ---- IRAM 压缩: WiFi 的两个 IRAM 优化 (默认 =y) ----
+# 曾试着关掉它们来省 IRAM —— **实测无效**, 溢出字节一字不差 (1872 → 1872)。
+# 原因: ESP32 的 WiFi 是预编译库 (lib/esp32/libcore.a 等), 这两个 Kconfig 只对
+#       **源码编译**的 WiFi 生效。故这里保持 IDF 默认 (不写 =n), 免得白降 WiFi 性能。
+# 真正的解法见下面「蓝牙: 关闭」。
 
-# ---- NimBLE 小包缓冲池 (KittenBlock 长命令) ----
-# 与 S3 同值。默认 12 块, KittenBlock 按 20 字节硬编码分包 + 回显通知会耗尽
-# → 长命令第 2 包起被丢 (见 AGENTS.md 蓝牙节)。每块 256 字节 ⇒ 净增 ~3KB 内部 RAM。
-# ⚠ 经典 ESP32 内部 RAM 比 S3 更紧 (无 PSRAM 兜底), 若链接期报 DRAM 不足,
-#   先降这个数到 16 再试。
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
+# ---- 蓝牙: 关闭 (用功能换 IRAM) ----
+# IRAM 溢出的真正解法。经典 ESP32 的 iram0_0_seg 只有 128KB, 而蓝牙控制器
+# (libbtdm_app) 是**预编译库**, `CONFIG_BT_*` 里的 IRAM 相关选项改不动它内部布局 ——
+# 只能整块不链。关掉后少链 libbt.a + libbtdm_app, 余量远大于缺的 1872 字节。
+#
+# ⚠ 与 drivers/board_config.h 的 BPUPPY_BLE_ENABLE=0、drivers/micropython.cmake 的
+#   源文件排除是**同一件事的三处**: 少任一处都编不过 (NimBLE 头文件此时不存在)。
+# ⚠ S3 目标不读这个文件 —— 现网固件照旧带蓝牙。
+# ⚠ 台架只能用 USB 串口 (COM, 115200); KittenBlock 蓝牙连不上是预期行为。
+# CONFIG_BT_ENABLED is not set

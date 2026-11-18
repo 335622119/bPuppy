@@ -4,7 +4,8 @@ bPuppy 机器狗 — MicroPython 启动脚本
 
 启动顺序:
   1. 挂载 VFS (Flash 文件系统)
-  2. 启动 BLE (KittenBlock 蓝牙 / Hiwonder, 由固件编译模式决定)
+  2. 启动 BLE (KittenBlock 蓝牙 / Hiwonder, 由固件编译模式决定;
+       esp32 台架目标编译期关闭, 见 drivers/board_config.h 的 BPUPPY_BLE_ENABLE)
   3. 原厂无条件初始化: IDLE → POSE → 站姿待命
   4. 电池电压检测 + WS2812 指示灯 (frozen/voltage.py, 上电默认)
   5. 语音控制 — CI-33T 语音模块 (frozen/voice.py, UART2/9600, 上电默认)
@@ -109,11 +110,24 @@ except Exception as e:
 
 # ---- 启动 BLE (固件编译模式决定: KittenBlock Nordic / Hiwonder FFE0) ----
 # KittenBlock 模式时 C 层 (ble_driver_mpy.c) 自动注册 dupterm REPL 通道
+#
+# ⚠ esp32 台架目标**不编蓝牙** (board_config.h 的 BPUPPY_BLE_ENABLE=0, 用 IRAM 换的),
+#   `import bpuppy_ble` 在那里会 ImportError。所以先问 bpuppy 再 import,
+#   否则只能靠 except: pass 静默失败, 看串口的人会以为"蓝牙有问题"。
+_ble_on = True
 try:
-    import bpuppy_ble
-    bpuppy_ble.start()
+    _ble_on = bpuppy.ble_enabled()
 except Exception:
-    pass
+    pass   # 老固件没有这个函数 → 按"有蓝牙"处理 (S3 现网板)
+
+if not _ble_on:
+    print("[bPuppy] 本固件未编蓝牙 (bpuppy.ble_enabled()=False) — 用 USB 串口 115200 控制")
+else:
+    try:
+        import bpuppy_ble
+        bpuppy_ble.start()
+    except Exception as _e:
+        print("[bPuppy] [WARN] BLE 启动失败: %s" % _e)
 
 # ============================================================
 # 原厂初始化 (无条件执行) — IDLE → POSE → 站姿待命

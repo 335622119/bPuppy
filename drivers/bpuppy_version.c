@@ -6,6 +6,7 @@
  *   import bpuppy
  *   bpuppy.version()       → "v0.1  Jul  9 2026 14:30:00"
  *   bpuppy.board()         → "esp32s3" | "esp32"   (本次构建的 SoC 目标)
+ *   bpuppy.ble_enabled()   → True | False          (本构建是否带蓝牙)
  *
  * board() 的用途: frozen 的 .py 看不到 Kconfig, 但**引脚是按目标不同的**
  * (例如语音 UART2 在 S3 是 19/20, 在经典 ESP32 是 16/17)。frozen/voice.py
@@ -31,10 +32,19 @@ STATIC mp_obj_t bpuppy_board(void) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(bpuppy_board_obj, bpuppy_board);
 
+/* 本次构建是否带蓝牙 (BPUPPY_BLE_ENABLE)。
+ * frozen 的 .py 看不到 C 宏 —— 连 bpuppy_ble 模块都不存在时 `import` 会失败,
+ * 所以由这里回答"该不该 import", 让 main.py 能打一行明确的日志而不是静默 pass。 */
+STATIC mp_obj_t bpuppy_ble_enabled(void) {
+    return mp_obj_new_bool(BPUPPY_BLE_ENABLE != 0);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(bpuppy_ble_enabled_obj, bpuppy_ble_enabled);
+
 STATIC const mp_rom_map_elem_t bpuppy_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_bpuppy) },
     { MP_ROM_QSTR(MP_QSTR_version),   MP_ROM_PTR(&bpuppy_version_obj) },
     { MP_ROM_QSTR(MP_QSTR_board),     MP_ROM_PTR(&bpuppy_board_obj) },
+    { MP_ROM_QSTR(MP_QSTR_ble_enabled), MP_ROM_PTR(&bpuppy_ble_enabled_obj) },
 };
 STATIC MP_DEFINE_CONST_DICT(bpuppy_globals, bpuppy_globals_table);
 

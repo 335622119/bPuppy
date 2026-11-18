@@ -15,13 +15,24 @@ target_sources(usermod INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/ik.c
     ${CMAKE_CURRENT_LIST_DIR}/motion_task.cpp
     ${CMAKE_CURRENT_LIST_DIR}/motion_task_mpy.c
-    ${CMAKE_CURRENT_LIST_DIR}/ble_driver.c
-    ${CMAKE_CURRENT_LIST_DIR}/ble_driver_mpy.c
-    ${CMAKE_CURRENT_LIST_DIR}/ble_stream.c
     ${CMAKE_CURRENT_LIST_DIR}/camera_driver.c
     ${CMAKE_CURRENT_LIST_DIR}/led_driver.c
     ${CMAKE_CURRENT_LIST_DIR}/pwm_ext_driver.c
 )
+
+# 蓝牙源文件: 仅在目标带 BLE 时编译 (drivers/board_config.h 的 BPUPPY_BLE_ENABLE)
+#
+# 经典 ESP32 台架关 BLE 是为了换 IRAM —— iram0_0_seg 只有 128KB, 而蓝牙控制器是
+# 预编译库, 关不掉它内部占的 IRAM, 只能整块不链。详见 board_config.h 注释。
+# ⚠ 不能只靠"不定义 BPUPPY_BLE_KEBLOCK": ble_driver.c 的函数体在宏外,
+#   且 NimBLE 头文件在 CONFIG_BT_ENABLED=n 时不存在 ⇒ 必须连源文件一起排除。
+if(NOT BPUPPY_TARGET STREQUAL "esp32")
+    target_sources(usermod INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/ble_driver.c
+        ${CMAKE_CURRENT_LIST_DIR}/ble_driver_mpy.c
+        ${CMAKE_CURRENT_LIST_DIR}/ble_stream.c
+    )
+endif()
 
 # 添加模块头文件搜索路径
 target_include_directories(usermod INTERFACE
@@ -42,5 +53,7 @@ target_include_directories(usermod INTERFACE
 #
 # 切换: 注释/取消注释下面两行之一, 重新编译
 # ============================================================
-target_compile_definitions(usermod INTERFACE BPUPPY_BLE_KEBLOCK)
-# target_compile_definitions(usermod INTERFACE BPUPPY_BLE_HIWONDER)
+if(NOT BPUPPY_TARGET STREQUAL "esp32")
+    target_compile_definitions(usermod INTERFACE BPUPPY_BLE_KEBLOCK)
+    # target_compile_definitions(usermod INTERFACE BPUPPY_BLE_HIWONDER)
+endif()

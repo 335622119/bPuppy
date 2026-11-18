@@ -37,6 +37,9 @@
 #define BPUPPY_VOICE_UART_TX  19
 #define BPUPPY_VOICE_UART_RX  20
 
+/* 蓝牙: 现网板必备 (KittenBlock 无线连接 + 无线上传) */
+#define BPUPPY_BLE_ENABLE     1
+
 /* ================================================================
  * ESP32-WROOM-32D (经典 ESP32-D0WD) — 台架验证
  *
@@ -74,6 +77,24 @@
  * 本轮不验证语音功能, 但引脚必须换 —— 指向不存在的 pad 行为未定义。 */
 #define BPUPPY_VOICE_UART_TX  16
 #define BPUPPY_VOICE_UART_RX  17
+
+/* 蓝牙: 台架**关闭** —— 这是用功能换 IRAM 的取舍, 不是"暂时没调通"。
+ *
+ * 原因: 经典 ESP32 的 iram0_0_seg 只有 128KB, 而 WiFi / BT 控制器都是**预编译库**
+ *       (libbtdm_app / lib/esp32/libcore.a), 关 WiFi 的 IRAM 优化选项对它们无效
+ *       (实测溢出字节一字不差, 见 docs/esp32台架移植结论.md §7.2)。
+ *       开启 BLE 时链接期报 `iram0_0_seg` 溢出 1872 字节; 关掉后余量充足,
+ *       以后加功能也不会立刻再爆。
+ *
+ * 代价: 台架只能用 USB 串口 (COM, 115200) 控制, KittenBlock 蓝牙连不上。
+ *       走 `BPUPPY_TARGET=esp32s3` 编出来的现网固件**完全不受影响**。
+ *
+ * 实现 (三处联动, 缺一处就编不过):
+ *   drivers/micropython.cmake —— 不编 ble_driver.c / ble_driver_mpy.c / ble_stream.c
+ *   sdkconfig.bpuppy.esp32   —— CONFIG_BT_ENABLED=n (连预编译蓝牙控制器一起不链)
+ *   frozen/main.py           —— 按 bpuppy.ble_enabled() 跳过 bpuppy_ble.start()
+ */
+#define BPUPPY_BLE_ENABLE     0
 
 #else
 #error "board_config.h: 未支持的 SoC 目标 (只支持 CONFIG_IDF_TARGET_ESP32S3 / CONFIG_IDF_TARGET_ESP32)"
