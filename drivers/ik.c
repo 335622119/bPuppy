@@ -1,0 +1,143 @@
+/*
+ * bDog 逆运动学 (IK) — 2-DOF 单腿解算
+ *
+ * 几何模型:
+ *   髋关节 O ─── L1 (大腿) ─── 膝关节 K ─── L2 (小腿) ─── 足端 F
+ *
+ *   已知: F 相对于 O 的坐标 (foot_x, foot_z), L1=40, L2=45
+ *        (默认值见 ik.h 的 IK_L1_DEFAULT / IK_L2_DEFAULT, 是函数参数不是硬编码)
+ *   求解: ∠hip (髋角), ∠knee (膝角)
+ *
+ * IK 公式:
+ *   d² = x² + z²
+ *   knee_angle  = acos((L1² + L2² - d²) / (2·L1·L2))    // 膝弯曲程度
+ *   hip_angle   = atan2(z, x) + acos((L1² + d² - L2²) / (2·L1·d))
+ */
+
+#include "ik.h"
+#include <math.h>
+#include "esp_log.h"
+#include "py/runtime.h"
+#include "py/obj.h"
+
+// 运行时舵机极限 (可通过 motion_set_joint_limits() 修改 + NVS 持久化)
+float ik_hip_min  = IK_HIP_MIN_DEFAULT;
+float ik_hip_max  = IK_HIP_MAX_DEFAULT;
+float ik_knee_min = IK_KNEE_MIN_DEFAULT;
+float ik_knee_max = IK_KNEE_MAX_DEFAULT;
+
+#define DEG(x)  ((x) * 180.0f / (float)M_PI)
+
+ik_result_t ik_solve_2dof(float foot_x, float foot_z,
+                          float L1, float L2, int side, int leg_pair)
+{
+    ik_result_t r;
+
+    // ---- 入口兜底 ----
+    // 这里是唯一能挡住所有调用方的地方: bpuppy_ik.solve(x, z, L1, L2, ...) 是公开的,
+    // Python 可以绕过所有 setter 直接传 L1/L2 进来 (也绕过 NVS 校验)。
+    // L1/L2 = 0 会让下面第 46 行除以 0 → acosf(±inf) = NaN, 而四句角度钳位都是
+    // 比较式 (NaN 参与比较恒为假), NaN 会一路穿到舵机占空比, 变成未定义行为。
+    // 用 !(a >= min && a <= max) 而不是 (a < min || a > max): 前者对 NaN 也为真。
+    if (!(L1 >= IK_LEN_MIN && L1 <= IK_LEN_MAX)) L1 = IK_L1_DEFAULT;
+    if (!(L2 >= IK_LEN_MIN && L2 <= IK_LEN_MAX)) L2 = IK_L2_DEFAULT;
+    // 足端坐标同理: NaN/inf 会污染 d, 钳位不会纠正它 (区间是有限的, 比较却恒假)。
+    // 这里是"是否有限"的判定 —— 用 !(fabsf(x) < 大数) 而非 isfinite(), 因为后者在新
+    // 库里是随 __STDC_VERSION__ 有条件定义的宏, 同仓库别的文件也没用过它。
+    if (!(fabsf(foot_x) < 1e6f)) foot_x = 0.0f;
+    if (!(fabsf(foot_z) < 1e6f)) foot_z = 0.0f;
+
+    float L1L2_max = L1 + L2;
+    float L2L1_min = fabsf(L2 - L1);
+
+    float d_sq = foot_x * foot_x + foot_z * foot_z;
+    float d = sqrtf(d_sq);
+
+    // 钳位到机械可达范围
+    if (d > L1L2_max - 1.0f)  d = L1L2_max - 1.0f;
+    if (d < L2L1_min + 1.0f)  d = L2L1_min + 1.0f;
+
+    // 膝角 (大腿与小腿之间的夹角, 0°=并拢折叠, 180°=完全伸直)
+    float cos_knee = (L1 * L1 + L2 * L2 - d * d) / (2.0f * L1 * L2);
+    if (cos_knee > 1.0f)  cos_knee = 1.0f;
+    if (cos_knee < -1.0f) cos_knee = -1.0f;
+    float knee_angle = acosf(cos_knee);  // [0, π], 0=折叠  π=伸直
+
+    // 髋角 (大腿与水平面夹角, 0=水平向前, 90°=指向下)
+    float alpha = atan2f(foot_z, foot_x);               // 足端方向
+    float cos_beta = (L1 * L1 + d * d - L2 * L2) / (2.0f * L1 * d);
+    if (cos_beta > 1.0f)  cos_beta = 1.0f;
+    if (cos_beta < -1.0f) cos_beta = -1.0f;
+    float beta = acosf(cos_beta);
+    // 膝后弯: hip = alpha + beta   膝前弯: hip = alpha - beta
+    float hip_angle;
+#if IK_KNEE_REAR_FORWARD
+    hip_angle = (leg_pair == IK_LEG_REAR) ? (alpha - beta) : (alpha + beta);
+#else
+    hip_angle = alpha + beta;
+#endif
+
+    // 弧度 → 舵机度
+    r.hip_deg = DEG(hip_angle);
+
+    // 膝舵机映射
+    float knee_deg = DEG(knee_angle);  // 0°=直, 180°=最大折
+
+    // 后腿前弯: 膝角映射左右互换 (0=四腿后弯, 1=后腿前弯兼真狗式)
+    int knee_mirror = (side == IK_SIDE_RIGHT);
+#if IK_KNEE_REAR_FORWARD
+    if (leg_pair == IK_LEG_REAR) knee_mirror = !knee_mirror;
+#endif
+
+    if (side == IK_SIDE_RIGHT) {
+        r.hip_deg = 180.0f - r.hip_deg;
+    }
+    r.knee_deg = knee_mirror ? (180.0f - knee_deg) : knee_deg;
+
+    // 钳位 (运行时变量, NVS 可覆盖)
+    if (r.hip_deg < ik_hip_min)  r.hip_deg = ik_hip_min;
+    if (r.hip_deg > ik_hip_max)  r.hip_deg = ik_hip_max;
+    if (r.knee_deg < ik_knee_min) r.knee_deg = ik_knee_min;
+    if (r.knee_deg > ik_knee_max) r.knee_deg = ik_knee_max;
+
+    return r;
+}
+
+/* ---- MicroPython 绑定 ---- */
+
+STATIC mp_obj_t mp_ik_solve(size_t n_args, const mp_obj_t *args) {
+    float foot_x  = mp_obj_get_float(args[0]);
+    float foot_z  = mp_obj_get_float(args[1]);
+    float L1      = mp_obj_get_float(args[2]);
+    float L2      = mp_obj_get_float(args[3]);
+    int   side    = mp_obj_get_int(args[4]);
+    int   leg_pair = mp_obj_get_int(args[5]);
+
+    ik_result_t r = ik_solve_2dof(foot_x, foot_z, L1, L2, side, leg_pair);
+
+    mp_obj_t items[2] = {
+        mp_obj_new_float(r.hip_deg),
+        mp_obj_new_float(r.knee_deg),
+    };
+    return mp_obj_new_tuple(2, items);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mp_ik_solve_obj, 6, 6, mp_ik_solve);
+
+STATIC const mp_rom_map_elem_t ik_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___name__),    MP_ROM_QSTR(MP_QSTR_bpuppy_ik) },
+    { MP_ROM_QSTR(MP_QSTR_solve),       MP_ROM_PTR(&mp_ik_solve_obj) },
+    // 常量
+    { MP_ROM_QSTR(MP_QSTR_LEFT),        MP_ROM_INT(IK_SIDE_LEFT) },
+    { MP_ROM_QSTR(MP_QSTR_RIGHT),       MP_ROM_INT(IK_SIDE_RIGHT) },
+    { MP_ROM_QSTR(MP_QSTR_FRONT),       MP_ROM_INT(IK_LEG_FRONT) },
+    { MP_ROM_QSTR(MP_QSTR_REAR),        MP_ROM_INT(IK_LEG_REAR) },
+    { MP_ROM_QSTR(MP_QSTR_L1),          MP_ROM_INT(IK_L1_DEFAULT) },
+    { MP_ROM_QSTR(MP_QSTR_L2),          MP_ROM_INT(IK_L2_DEFAULT) },
+};
+STATIC MP_DEFINE_CONST_DICT(ik_globals, ik_globals_table);
+
+const mp_obj_module_t bpuppy_ik_module = {
+    .base = { &mp_type_module },
+    .globals = (mp_obj_dict_t *)&ik_globals,
+};
+MP_REGISTER_MODULE(MP_QSTR_bpuppy_ik, bpuppy_ik_module);

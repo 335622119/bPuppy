@@ -1,0 +1,45 @@
+# =============================================================
+# bPuppy ESP32 (经典) — 覆盖板级默认值
+# 目标: ESP32-WROOM-32D (4MB Flash, 无 PSRAM) — 台架验证
+#
+# 与 sdkconfig.bpuppy (S3/16MB) 的差异就三处:
+#   Flash  4MB DIO 40MHz   (S3 是 16MB QIO 80MHz)
+#   分区表 4MB 版本         (S3 是 16MB 版本)
+#   相机   **不开** PSRAM DMA (本芯片没有 PSRAM; 相机本轮也不初始化)
+#
+# ⚠ ESP32 上没有 PSRAM / USB-OTG / LCD_CAM / USB-JTAG —— 相关 CONFIG 一律不写,
+#   写了也只会被忽略, 反而让人以为它生效了。
+#
+# ⚠ 改完必须删 build/sdkconfig 再编译 (否则新增的 CONFIG 不生效, 见 AGENTS.md
+#   「sdkconfig 三层覆盖机制」)。
+# =============================================================
+
+# ---- Flash 4MB DIO 40MHz (WROOM-32D N4) ----
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=
+CONFIG_ESPTOOLPY_FLASHFREQ_40M=y
+
+# ---- 4MB 分区表 (nvs 偏移/尺寸与 S3 版一致) ----
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_esp32_4m.csv"
+
+# ---- 主频 240MHz ----
+# 默认 160MHz。50Hz 步态循环 + BLE 同时跑, 留点余量; 若实测电流/发热有顾虑可回 160。
+CONFIG_ESP32_DEFAULT_CPU_FREQ_160=
+CONFIG_ESP32_DEFAULT_CPU_FREQ_240=y
+
+# ---- 日志级别: INFO (与 S3 现网一致, 台架排查要看日志) ----
+CONFIG_LOG_DEFAULT_LEVEL_ERROR=
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ---- NimBLE 小包缓冲池 (KittenBlock 长命令) ----
+# 与 S3 同值。默认 12 块, KittenBlock 按 20 字节硬编码分包 + 回显通知会耗尽
+# → 长命令第 2 包起被丢 (见 AGENTS.md 蓝牙节)。每块 256 字节 ⇒ 净增 ~3KB 内部 RAM。
+# ⚠ 经典 ESP32 内部 RAM 比 S3 更紧 (无 PSRAM 兜底), 若链接期报 DRAM 不足,
+#   先降这个数到 16 再试。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24

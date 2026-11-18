@@ -1,0 +1,20 @@
+# bPuppy ESP32 (经典) 4MB Flash 分区表 — 台架验证用
+# 格式: Name,   Type, SubType, Offset,  Size
+# 4MB = 2MB factory (含引导区) + ~1.9MB VFS
+#
+# ⚠ nvs 的偏移与尺寸必须与 partitions.csv (S3 版) **逐字节相同**:
+#   它是舵机三点标定 / 腿长几何 / IMU 标定的唯一存放处。
+#   两版都把 nvs 放在 0x9000 / 0x6000, 所以同一块板子来回切固件不会丢标定 ——
+#   前提是**只烧 app 分区**, 绝不用 erase-flash / --erase-all。
+#
+# 经典 ESP32 的引导偏移与 S3 不同:
+#   bootloader  0x1000  (S3 是 0x0)
+#   partition   0x8000
+#   app         0x10000
+#
+# 余量: 固件约 1.67MB, factory 2MB ⇒ 剩约 330KB。再加功能会挤, 换 N8 模块可解。
+
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xF000,  0x1000
+factory,  app,  factory, 0x10000, 0x200000
+vfs,      data, fat,     0x210000, 0x1F0000

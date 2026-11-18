@@ -1,0 +1,212 @@
+/*
+ * bDog 运动控制任务 — 头文件
+ *
+ * FreeRTOS 实时任务，控制四足机器狗的步态运动。
+ * 与 MicroPython 并行运行，通过全局状态结构体与 Python 层通信。
+ *
+ * 步态统一框架:
+ *   左右两侧各有两条腿，同侧间隙 + 单腿摆动占比构成基本节拍单元。
+ *   walk 和 trot 的区别仅在于 duty/gap 参数不同。
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- 步态类型 ---- */
+typedef enum {
+    GAIT_STOP = 0,      // 停止站好 (运动模式, 高度随参数)
+    GAIT_WALK,          // 猫步
+    GAIT_TROT,          // 小跑
+    GAIT_GO,            // 自适应 (speed≤4.0→walk, speed≥6.0→trot, 之间插值; 见 motion_task_main 的 GO 分支)
+                        // ★ GO 自己定 步长/站高/抬脚 —— 用户设的 stride/lift/height 三个全都不参与
+    GAIT_REPOS,         // ★ 回正步 (停步收尾): 身体不动, 对角两两抬脚把四腿挪回 x=0 —— 见 motion_enter_repos()
+    GAIT_COUNT
+} gait_type_t;
+
+/* ---- 运行模式状态机 (自动切换) ---- */
+// IDLE  = 上电未初始化;  POSE = Python 接管舵机;  MOTION = motion task 控制
+typedef enum {
+    MODE_IDLE = 0,
+    MODE_POSE,
+    MODE_MOTION,
+} motion_mode_t;
+
+/* ---- 相位联动摆动 (body sway) 的默认值与量级闸门 ----
+ * 公式、幅值-裕量的量化、为什么只能前后 (无左右自由度)、以及"幅值受步速约束"
+ * (大了会让机身周期性停顿/倒退 —— 一卡一卡) 见 motion_task.cpp 的 SWAY_* 注释 */
+#define SWAY_DEFAULT        0.0f   // 默认关 (2026-10-11 定): 平滑幅度收益有限, 需要时 REPL 开
+#define SWAY_MAX_AMP       24.0f   // 量级闸门 (组合校验才是真闸门)
+
+/* ---- 运动状态 ---- */
+typedef struct {
+    gait_type_t gait;           // 当前步态
+    float       speed;          // 速度 (当前, 平滑后)
+    float       target_speed;   // 速度 (目标)
+    float       stride;         // 步长**幅度** (mm, ≥0; 0 = 原地踏步) —— 方向见 direction
+    float       direction;      // +1 = 前, -1 = 后 —— 独立参数, 上电默认 +1
+    float       height;         // 站立高度 (mm)
+    float       lift_height;    // 抬腿高度 (mm)
+    float       body_roll;      // 身体目标横滚角 (deg)
+    float       body_pitch;     // 身体目标俯仰角 (deg)
+    float       ik_L1;          // IK 大腿长度校准 (mm)
+    float       ik_L2;          // IK 小腿长度校准 (mm)
+    float       omega_base;     // 基准角频率 (rad/s), 默认 2.0
+    float       gait_duty;      // 摆动相占比 (walk:0.20, trot:0.40)
+    float       gait_gap;       // 同侧间隙 (walk:0.04, trot:0.10)
+    float       turn;           // 转弯系数 -1(左) ~ +1(右)
+    float       center_offset;  // 中位点**中点**前后平移 (正=前移, 负=后移)
+    float       center_spacing; // 前/后腿中位点**间距**: 前腿 +s/2, 后腿 -s/2 (正=放宽, 负=收窄)
+    float       sway_amp;       // 相位联动摆动幅值 (mm, 见 motion_set_sway; 0=关)
+    float       body_half_l;    // 前后髋半距 (mm), 默认 62.5
+    float       body_half_w;    // 左右髋半宽 (mm), 默认 59.0
+    bool        emergency_stop; // 急停标志
+    bool        enabled;        // 运动使能
+
+    /* ---- 姿态过渡 (预备位切换) ---- */
+    // 0=无过渡  1=不可用 (从写死的 (0,eff_height) 起步, 坐姿按前进首帧跳 95.7°)
+    //            2=停步过渡 (行走→预备位→站立)
+    // 预备位 = gait 全踩地相位中点, 从站立进入或退回时在此缓动
+    uint8_t     pose_trans;       // 姿态过渡状态
+    float       pose_timer;       // 姿态过渡计时 (秒)
+} motion_state_t;
+
+/* ---- API ---- */
+
+// 启动运动控制 FreeRTOS 任务
+void motion_task_start(void);
+
+// 获取当前运动状态（Python 层可读取）
+const motion_state_t *motion_get_state(void);
+
+// 取本帧**实际生效**的步态参数 (只读, 纯上报, 不影响任何运动行为)
+//
+// 与 get_params() 的区别: 那里是**用户设进去的** stride/duty; 这里是 GO 覆盖 +
+// 步长淡入淡出之后**腿循环真正在用**的值。
+// ★ 用途: Python 侧做转弯归一化 —— 把 `turn` 这个几何系数换算成"与步态无关的转速指令"
+//   时, 需要 "turn=1 在当前步态下对应多少偏航角速度", 而它依赖实际 eff_stride/eff_duty。
+//   ⚠ 用 get_params() 的读数算会**在 GO 下算错** (GO 无视用户设的 stride)。
+// ⚠ 运动任务没跑时停在初值, 不会更新。
+void motion_get_effective(float *eff_stride, float *eff_duty);
+
+// 设置步态（自动填充 duty/gap/dir/turn）
+void motion_set_gait(gait_type_t gait);
+
+// 设置运动参数: 步长(mm, 正=前 零=原地 负=后), 抬脚高度(mm), 站立高度(mm)
+// 三者是同一条足端轨迹的三个维度, **一起校验、一起写入** —— 天然自洽, 无顺序耦合。
+// 返回是否写入成功 (false=超限被拒, 三个字段全部保持原值)
+bool motion_set_params(float stride, float lift, float height);
+
+// 设置目标速度/步频 (0~10)。与轨迹无关, 任意时刻可单独设, 不影响 stride/lift/height。
+// 返回是否写入成功 (false=超出 0~10 或 NaN 被拒, 保持原值)
+bool motion_set_speed(float speed);
+
+// IK 校准：调整大腿/小腿长度
+// 返回是否写入成功 (false=非法被拒, 保持原值)
+bool motion_cal_ik(float L1, float L2);
+
+// 身体尺寸校准：调整前后/左右髋距
+// 返回是否写入成功 (false=非法被拒, 保持原值)
+bool motion_set_body_dims(float half_l, float half_w);
+
+// 舵机极限校准：调整髋/膝舵机角度限位
+// 返回是否写入成功 (false=min/max 反了或非法, 保持原值)
+bool motion_set_joint_limits(float hip_min, float hip_max,
+                              float knee_min, float knee_max);
+
+// 几何参数持久化：从 NVS 加载 / 保存到 NVS
+void motion_load_geometry(void);
+void motion_save_geometry(void);
+
+// 确保几何参数已从 NVS 载入 —— 运动任务未创建时代为加载 (Python 侧读取几何前调用)
+void motion_ensure_geometry_loaded(void);
+
+// 设置基准角频率 (rad/s)
+void motion_set_omega(float omega);
+
+// 设置身体姿态 (deg): 俯仰(前低后高为负) / 横滚
+// ★ 参数顺序 = 俯仰在前 —— 跟积木文案「俯仰 [PITCH]…滚转 [ROLL]」一致。
+// 返回是否写入成功 (false=跟当前 stride/height/lift/重心组合后足端够不着或入地, 被拒,
+// 俯仰和横滚都保持原值)。
+// ★ 姿态补偿是逐腿叠加进 z 的, 所以它能改变可达性 —— 必须跟 set_params 一样做组合校验
+//   (pitch=-12° → 前腿 d=90.3 > 84)。
+bool motion_set_body_pose(float pitch, float roll);
+
+// 设置转弯系数 (-1=左, +1=右, 0=直)
+// ★ 写入的是**目标值**: 运动中喂给腿循环的实际值每帧限速跟随 (RAMP_TURN_STEP,
+//   见 motion_task.cpp 的 RAMP 段注释); 静止 (站姿/回正) 时直接对齐。
+// 返回是否原样采纳。false 有两种, **含义不同**:
+//   超限 → 已**钳位**到 ±1, 且**写入了钳位后的值** (不是拒绝)
+//   NaN  → **拒绝**, 保持原值 (NaN 能穿过两个钳位 —— 与任何数比较恒假)
+bool motion_set_turn(float turn);
+
+// 设置运动方向 (+1=前, -1=后) —— 独立参数, 上电默认 +1。
+// 与步长/速度/步态**完全解耦**: 改方向不再连带改步长, 反之亦然。
+// 返回是否原样采纳 (false=0 或 NaN 被拒, 保持原值)
+bool motion_set_direction(float dir);
+
+// 设置中位点**中点**前后平移 (正=前移, 负=后移) —— 前后腿一起挪。
+// 返回是否写入成功 (false=被拒, 保持原值且不写 NVS)。被拒有两种原因:
+//   (1) 量级超 ±大腿长/2 = ±20mm;
+//   (2) 量级没超, 但跟当前 stride/height/lift 组合后足端够不着
+//       (默认 stride=70 height=70 时实际上限只有 11.4mm, 见 docs/error.md §2.2 #2)
+bool motion_set_center(float offset);
+
+// 设置前/后腿中位点的**间距** (正 = 展开: 前腿 +s/2、后腿 -s/2; 负 = 收窄; 单位 mm)。
+// 用途: 低站高/大摆幅时前腿髋(向后端点)/后腿髋(向前端点)最先顶限位, 展开间距把髋的
+// 负担转移给膝(伸展侧)配平两侧余量; 代价是向前端点吃可达预算 ⇒ 最大步长缩短。
+// ★ 运行时参数, **不落盘** (与 stride/height/lift 同类, 掉电回 0);
+// ★ 只在 walk/trot 生效, **GO 不叠加** (GO 用固定几何)。
+// 返回是否写入成功 (false=被拒, 保持原值)。被拒有两种原因:
+//   (1) 量级超 ±2×前后髋半距 (默认 ±125mm);
+//   (2) 量级没超, 但跟当前 stride/height/lift/中点组合后足端够不着(组合校验)。
+bool motion_set_center_spacing(float spacing);
+
+// 设置相位联动摆动 (body sway) 幅值 A (mm, ≥0; 0 = 关)。
+// 用途: walk 里支撑三足的斜边几乎从机身中心穿过 (后腿抬 / 前腿落 四个瞬间重心到
+// 边界只有 ~2mm)。摆动给足端图案叠加 sway_x(t) = -A·dir·cos(4π(t-0.095)) ——
+// 这些瞬间等效于重心前后挪 ±0.28A·(格)。
+// ★ 只能前后 —— 本机构足端 y 恒为 ±body_half_w (ik 只有 (x,z)), 无左右自由度;
+// ★ 只在 walk 族生效: trot/GO 高速段自动归零, 起步/停车随步长系数收放;
+// ★ 运行时参数, **不落盘**; **默认 0 (关)** —— 按需在 REPL 开。
+// ★ 幅值受**步速**约束 (实测): 不倒退上限 ≈ 0.0995×stride (S70 → 7.0mm)。
+//   3~7 是平滑可用区间 (A=5 时有效最低静稳裕量 4.6 → ~7.5mm);
+//   超过上限机身会周期性停顿/倒退 —— 观感"走一步停一下", 但裕量确实更大 (A=12 → ~9.5mm),
+//   要不要这个取舍由使用者定 (超限只警告不拒)。
+// 返回是否写入成功 (false=被拒, 保持原值)。被拒有两种原因:
+//   (1) 量级超 SWAY_MAX_AMP=24mm;
+//   (2) 量级没超, 但跟当前 stride/height/lift/center/spacing 组合后足端够不着
+//       (低站高+大间距时可达余量可能只剩 2~3mm, 只能给小幅值)。
+bool motion_set_sway(float amp);
+
+// 检查运动任务是否正在运行（enabled 且未急停）
+bool motion_is_running(void);
+
+// 设置运行模式 (自动转换入口)
+void motion_set_mode(motion_mode_t mode);
+motion_mode_t motion_get_mode(void);
+
+// MicroPython servo 绑定调用: Python 动舵机 → 自动切 POSE
+void motion_python_servo_write(void);
+
+/* ---- 跌倒保护 (C 层 50Hz 检测, Python 只负责声音恢复) ---- */
+// 立即锁存关断: 停运动 + 关 8 路主舵机 + PWM_EXT 扩展舵机; 恢复前写舵机全部拒绝。
+void motion_safety_release(void);
+// 按给定 8 路命令角重新上力 (调用方负责确认机身已放平); 运动保持 POSE。
+void motion_safety_rearm_at(const float *angles, int count);
+bool motion_safety_latched(void);
+// 上电默认关; frozen/main.py 的 fall_guard.start() 打开。
+void motion_safety_set_enabled(bool enabled);
+// poses.stand() 置 true; crouch/sit/play/wave/go_to/set_servo 等置 false。
+void motion_safety_set_pose_active(bool active);
+// 运行时阈值: 倾角 (°) / 角速度 (°/s) / 连续帧数 (50Hz)。
+void motion_safety_config(float angle, float rate, int frames);
+
+#ifdef __cplusplus
+}
+#endif

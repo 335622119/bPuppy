@@ -1,0 +1,57 @@
+{
+    "id": "bpuppy",
+    "name": {
+        "zh-CN": "bPuppy 机器狗",
+        "zh-TW": "bPuppy 機器狗",
+        "en": "bPuppy Robot Dog"
+    },
+    "version": "1.2.0",
+    "type": "micropy",
+    "fwtype": "esptool",
+    "replmode": true,
+    "execmode": true,
+    "kittenext": true,
+    "mainboard": true,
+    "buildinpyb": true,
+    "color1": "#2DD4BF",
+    "color2": "#14B8A6",
+    "color3": "#0D9488",
+    "filesystem": "pyboard",
+    "masterExt": "bpuppy",
+    "tags": ["hardware"],
+    "io": ["serial", "ble"],
+    "connect": {
+        "baudrate": 115200,
+        "batch": 48,
+        "wait": 5000
+    },
+    "afterConnect": [
+        "import bpuppy_motion",
+        "import poses",
+        "import bpuppy_imu",
+        "import voice",
+        "import heading_anchor as anc",
+        "import balance",
+        "from time import sleep",
+        "bpuppy_imu.init(0, 14, 21, 0x68)",
+        "voice.set_main_globals(globals())",
+        "import motion_kb as _m",
+        "_m.bind(globals())",
+        "_speed = 2.5; _stride = 70; _lift = 30; _height = 70; _dir = 1",
+    "_ok = True"
+    ],
+    "ble": {
+        "boardcast": "0x6e40",
+        "service": "6E400001-B5A3-F393-E0A9-E50E24DCCA9E",
+        "txChar": "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
+        "rxChar": "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+    },
+    "file": "kblock.json5",
+    "micropython": {
+        "mainfile": "main.py",
+        "no_execfile": true
+    },
+    "image": "bpuppy.png",
+    "imageconvert": { "type": "png" },
+    "weights": 990
+}

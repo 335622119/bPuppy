@@ -1,0 +1,142 @@
+/*
+ * bPuppy ADC 电压测量 — 电池检测
+ *
+ * ⚠ 启用开关与通道号在 drivers/board_config.h (按 SoC 目标):
+ *   ESP32-S3 (现网板): BPUPPY_ADC_ENABLE=1, ADC1_CH2 = GPIO3 —— V3.0 硬件启用。
+ *   ESP32   (台架):    BPUPPY_ADC_ENABLE=0 —— S3 的电池脚 GPIO3 在经典 ESP32 上是
+ *                      UART0 RX, 且标定系数必须在目标板上重测, 故整块关闭。
+ *                      关闭后 adc_read_mv() 返回 -1, voltage.read_v() 返回 -1.0,
+ *                      read_pct() 返回 0 (约定的"不可用值", 不抛异常)。
+ *
+ * 硬件分压 (见 PCB/硬件连接.md, R1=51k/R2=10k):
+ *   电池正 ──[R1 51kΩ]──┬── GPIO3 (ADC1_CH2)
+ *                       │
+ *   GND  ────[R2 10kΩ]──┤
+ *   分压比 10/61 ≈ 0.164, 软件换算 ×6.1
+ *   满电 8.4V → ADC ~1.38V; 标称 7.4V → ADC ~1.21V
+ *
+ * MicroPython 接口:
+ *   import bpuppy_adc
+ *   bpuppy_adc.init()            # 初始化 (11dB 衰减, ~0-3.1V)
+ *                                # 同时激活 GPIO48 WS2812 电池指示灯 (见 led_driver.c)
+ *   mv = bpuppy_adc.read_mv()    # ADC 引脚电压 (mV)
+ *   volt = mv * 6.1 / 1000       # 电池电压 (V), 软件换算
+ *   # 推荐: import batt; batt.read_batt_v()  最小二乘线性拟合标定 (mpy_modules/batt.py)
+ *
+ * ⚠ 必须用 legacy ADC API (adc1_*): MicroPython 的 machine.ADC 使用 legacy
+ *   driver, ESP-IDF 5.x 中 legacy 与 driver_ng (adc_oneshot) 互斥,
+ *   混用会触发 "CONFLICT! driver_ng is not allowed..." 断言重启。
+ */
+
+#include "board_config.h"   // BPUPPY_ADC_ENABLE / BPUPPY_ADC_CHANNEL
+
+#include "py/runtime.h"
+#include "py/obj.h"
+#include "driver/adc.h"
+#include "esp_log.h"
+
+static const char *TAG = "adc";
+
+/* WS2812 电池指示灯 (led_driver.c): adc_init 后自动启动监控任务 */
+extern void led_batt_start(void);
+extern void led_batt_stop(void);
+
+#if BPUPPY_ADC_ENABLE
+#define ADC_DEFAULT_CHANNEL  ((adc1_channel_t)BPUPPY_ADC_CHANNEL)   // S3: 2 = GPIO3
+#define ADC_DEFAULT_ATTEN    ADC_ATTEN_DB_11  // ~0-3.1V
+#endif
+
+static bool g_adc_ready = false;
+
+void adc_init(void)
+{
+#if BPUPPY_ADC_ENABLE
+    if (g_adc_ready) return;
+
+    ESP_ERROR_CHECK(adc1_config_width(ADC_WIDTH_BIT_12));
+    ESP_ERROR_CHECK(adc1_config_channel_atten(ADC_DEFAULT_CHANNEL, ADC_DEFAULT_ATTEN));
+
+    g_adc_ready = true;
+    ESP_LOGI(TAG, "ADC ready  atten=11dB (legacy)");
+
+    /* 同时激活 WS2812 电池电压指示灯 (led_driver.c, 颜色随电压变化) */
+    led_batt_start();
+#else
+    ESP_LOGW(TAG, "电池检测已停用 (BPUPPY_ADC_ENABLE=0): read_mv() 返回 -1");
+    return;
+#endif
+}
+
+int adc_read_raw(void)
+{
+#if BPUPPY_ADC_ENABLE
+    if (!g_adc_ready) return -1;
+    return adc1_get_raw(ADC_DEFAULT_CHANNEL);   // 失败返回 -1
+#else
+    return -1;   // 已停用
+#endif
+}
+
+int adc_read_mv(void)
+{
+    int raw = adc_read_raw();   // 就绪检查 + adc1_get_raw + 失败返回 -1 都在里面
+    if (raw < 0) return -1;
+    // 11dB 衰减: ~0-3100mV → 0-4095 (12-bit)
+    return (int)((int64_t)raw * 3100 / 4096);
+}
+
+void adc_stop(void)
+{
+    g_adc_ready = false;
+    led_batt_stop();   /* 停掉电池指示灯监控任务 */
+    ESP_LOGI(TAG, "ADC stopped (read 返回 -1, 可重新 init)");
+}
+
+
+/* ================================================================
+ * MicroPython 导出接口
+ *
+ *   import bpuppy_adc
+ *   bpuppy_adc.init()        # 按 board_config.h: S3 = GPIO3/ADC1_CH2; esp32 台架已停用
+ *   mv = bpuppy_adc.read_mv()
+ *   raw = bpuppy_adc.read_raw()
+ * ================================================================ */
+
+STATIC mp_obj_t mp_adc_init(void) {
+    adc_init();
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(mp_adc_init_obj, mp_adc_init);
+
+STATIC mp_obj_t mp_adc_read_mv(void) {
+    return mp_obj_new_int(adc_read_mv());
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(mp_adc_read_mv_obj, mp_adc_read_mv);
+
+STATIC mp_obj_t mp_adc_read_raw(void) {
+    return mp_obj_new_int(adc_read_raw());
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(mp_adc_read_raw_obj, mp_adc_read_raw);
+
+STATIC mp_obj_t mp_adc_stop(void) {
+    adc_stop();
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(mp_adc_stop_obj, mp_adc_stop);
+
+// ---- 模块定义 ----
+STATIC const mp_rom_map_elem_t bpuppy_adc_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___name__),  MP_ROM_QSTR(MP_QSTR_bpuppy_adc) },
+    { MP_ROM_QSTR(MP_QSTR_init),      MP_ROM_PTR(&mp_adc_init_obj) },
+    { MP_ROM_QSTR(MP_QSTR_read_mv),   MP_ROM_PTR(&mp_adc_read_mv_obj) },
+    { MP_ROM_QSTR(MP_QSTR_read_raw),  MP_ROM_PTR(&mp_adc_read_raw_obj) },
+    { MP_ROM_QSTR(MP_QSTR_stop),      MP_ROM_PTR(&mp_adc_stop_obj) },
+};
+STATIC MP_DEFINE_CONST_DICT(bpuppy_adc_globals, bpuppy_adc_globals_table);
+
+const mp_obj_module_t bpuppy_adc_module = {
+    .base = { &mp_type_module },
+    .globals = (mp_obj_dict_t *)&bpuppy_adc_globals,
+};
+
+MP_REGISTER_MODULE(MP_QSTR_bpuppy_adc, bpuppy_adc_module);

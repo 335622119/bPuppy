@@ -1,0 +1,132 @@
+name: firmware
+
+# 远程编译 bPuppy 固件（两个目标并行）
+#
+# 为什么需要它：本地编译依赖 Docker + espressif/idf:v5.1.2 镜像。
+# Actions 的 ubuntu-latest 自带 Docker，且本仓库是 public ⇒ 标准 runner 免费不限分钟。
+#
+# ⚠ CI 只能替代"编得出来"。烧录 / 万用表 / 舵机实测（tasks 3.3~4.4）仍须真板子。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    # 直接跑官方 IDF 镜像，避免 docker-in-docker；build.sh 里那句 docker run 的等价物
+    container:
+      image: espressif/idf:v5.1.2
+      options: --user root
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32]
+
+    env:
+      IDF_CCACHE_ENABLE: "1"
+      CCACHE_DIR: /github/home/.ccache
+      TARGET: ${{ matrix.target }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.ccache
+          key: ccache-${{ matrix.target }}-${{ hashFiles('drivers/**', 'frozen/**', 'main/**', 'CMakeLists.txt', 'sdkconfig*', 'partitions*.csv') }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-
+
+      - name: 引导依赖 + 打补丁 + 编译
+        shell: bash
+        run: |
+          set -e
+          . "$IDF_PATH/export.sh" >/dev/null 2>&1
+          cd "$GITHUB_WORKSPACE"
+
+          echo "::group::阶段 1 — 拉取组件依赖"
+          # 干净 clone 里没有 components/（被 .gitignore 忽略）⇒ CMakeLists 走"模式 B"：
+          # project(bPuppy_<target>)，没有 USER_C_MODULES / frozen 清单，编不出正式固件。
+          # 但 configure 会运行组件管理器，把依赖下到 managed_components/ —— 我们只要这一步。
+          idf.py -DBPUPPY_TARGET="$TARGET" reconfigure \
+            || echo "::warning::模式 B configure 未成功，继续检查依赖目录"
+          echo "::endgroup::"
+
+          HELPER=managed_components/mr9you__micropython-helper
+          if [ ! -d "$HELPER" ]; then
+            echo "::error::组件管理器没有下载到 $HELPER"
+            ls -la managed_components 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "::group::阶段 2 — helper 放进 components/ 并清掉模式 B 的 build/"
+          # CMakeLists.txt:41 只认 components/mr9you__micropython-helper（历史原因：里面改过
+          # mphalport.c 的 dupterm 输入）。组件管理器却只下到 managed_components/。
+          # 这一步补的是"换台电脑 / CI 从零开始"的缺口，本地机器上是历史遗留目录顶着。
+          mkdir -p components
+          if [ ! -d components/mr9you__micropython-helper ]; then
+            cp -r "$HELPER" components/mr9you__micropython-helper
+          fi
+          rm -rf build   # 模式 B 的缓存必须清掉，否则 project() 名字对不上
+          echo "::endgroup::"
+
+          echo "::group::阶段 3 — 打补丁（与 build.sh 同逻辑，幂等）"
+          shopt -s nullglob
+          for p in patches/*.patch; do
+            if git -c core.autocrlf=false apply --check --reverse "$p" 2>/dev/null; then
+              echo "补丁已应用，跳过: $(basename "$p")"
+            elif git -c core.autocrlf=false apply "$p"; then
+              echo "已应用补丁: $(basename "$p")"
+            else
+              echo "::error::补丁应用失败: $(basename "$p")（多半是依赖升版，上下文对不上）"
+              exit 1
+            fi
+          done
+          echo "::endgroup::"
+
+          echo "::group::阶段 4 — 编译 BPUPPY_TARGET=$TARGET"
+          idf.py -DBPUPPY_TARGET="$TARGET" build
+          echo "::endgroup::"
+
+      - name: 产物报告
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          BIN=build/micropython_bpuppy.bin
+          [ -f "$BIN" ] || { echo "::error::没有 $BIN"; ls -l build | head -40; exit 1; }
+          SIZE=$(stat -c '%s' "$BIN")
+          echo "目标  : $TARGET"
+          echo "产物  : $BIN"
+          echo "大小  : $SIZE 字节"
+          sha256sum "$BIN"
+          # 基准: firmware/micropython_bpuppy.bin = 1750720 字节
+          # ⚠ 不是字节级比对: bpuppy_version.c 把 __DATE__/__TIME__ 编进固件，
+          #   每次构建内容都不同；只做体积趋势提示，不作为门禁。
+          if [ "$TARGET" = "esp32s3" ]; then
+            BASE=$(stat -c '%s' firmware/micropython_bpuppy.bin 2>/dev/null || echo 1750720)
+            echo "S3 体积基准: $BASE 字节，本次差 $((SIZE - BASE)) 字节"
+          fi
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          if-no-files-found: error
+          # 三个都要：新板全烧需要 bootloader + 分区表，只烧 app 则只要 .bin
+          path: |
+            build/micropython_bpuppy.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
