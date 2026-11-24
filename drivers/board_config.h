@@ -89,9 +89,12 @@
  * 代价: 台架只能用 USB 串口 (COM, 115200) 控制, KittenBlock 蓝牙连不上。
  *       走 `BPUPPY_TARGET=esp32s3` 编出来的现网固件**完全不受影响**。
  *
- * 实现 (三处联动, 缺一处就编不过):
+ * 实现 (四处联动, 缺一处就编不过):
  *   drivers/micropython.cmake —— 不编 ble_driver.c / ble_driver_mpy.c / ble_stream.c
  *   sdkconfig.bpuppy.esp32   —— CONFIG_BT_ENABLED=n (连预编译蓝牙控制器一起不链)
+ *   CMakeLists.txt           —— -DMICROPY_PY_BLUETOOTH=0
+ *                               ⚠ 端口 mpconfigport.h 是 `#ifndef ... #define 1`, 硬开蓝牙;
+ *                                 只关 IDF 的 BT 会让 mpnimbleport.c 去 include 已消失的头
  *   frozen/main.py           —— 按 bpuppy.ble_enabled() 跳过 bpuppy_ble.start()
  */
 #define BPUPPY_BLE_ENABLE     0

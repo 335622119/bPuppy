@@ -198,7 +198,26 @@ ESP32 的 WiFi 是**预编译库**（`lib/esp32/libcore.a` 等），这两个 Kc
 | `drivers/board_config.h` | `BPUPPY_BLE_ENABLE 0`（S3 分支是 `1`） |
 | `drivers/micropython.cmake` | `BPUPPY_TARGET=esp32` 时不编 `ble_driver.c` / `ble_driver_mpy.c` / `ble_stream.c` |
 | `sdkconfig.bpuppy.esp32` | `# CONFIG_BT_ENABLED is not set`（连预编译控制器一起不链） |
+| `CMakeLists.txt` | `-DMICROPY_PY_BLUETOOTH=0`（**见下方第二层坑**） |
 | `frozen/main.py` | 先问 `bpuppy.ble_enabled()`，为 False 时打一行日志、跳过 `bpuppy_ble.start()` |
+
+**第二层坑（2026-11-18 实测）**：只设 `CONFIG_BT_ENABLED=n` 会编译失败 ——
+
+```
+mpnimbleport.c:35:10: fatal error: esp_nimble_hci.h: No such file or directory
+modbluetooth_nimble.c:38:10: fatal error: host/ble_hs.h: No such file or directory
+```
+
+因为 MicroPython 的 `ports/esp32/mpconfigport.h:94` 是 **硬开**蓝牙的：
+
+```c
+#ifndef MICROPY_PY_BLUETOOTH
+#define MICROPY_PY_BLUETOOTH                (1)
+```
+
+`#ifndef` 意味着**命令行 `-DMICROPY_PY_BLUETOOTH=0` 可以压住它** —— 这是唯一不改第三方
+源码的关法。压成 0 后，`mpnimbleport.c` 与 `extmod/nimble/modbluetooth_nimble.c` 的函数体
+（含那些 `#include "host/ble_hs.h"`）整段消失，而 IDF 侧 NimBLE 库本来就没链。
 
 `bpuppy.ble_enabled()`（`drivers/bpuppy_version.c`）是给 frozen `.py` 用的 ——
 它们看不到 C 宏，而 `import bpuppy_ble` 在关闭后会直接 ImportError，

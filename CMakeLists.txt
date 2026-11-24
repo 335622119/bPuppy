@@ -67,17 +67,11 @@ if(EXISTS ${MICROPY_HELPER_DIR})
     # 仅 S3 有意义: 经典 ESP32 没有 USB-OTG, 不编译 esp_tinyusb
     if(BPUPPY_TARGET STREQUAL "esp32s3")
         idf_build_set_property(COMPILE_OPTIONS "-DCFG_TUD_CDC_EP_BUFSIZE=256" APPEND)
-    else()
-        # 关闭 Python 侧蓝牙 (esp32 台架, 见 drivers/board_config.h 的 BPUPPY_BLE_ENABLE)
-        #
-        # ⚠ 只设 CONFIG_BT_ENABLED=n 不够: MicroPython 的 ports/esp32/mpconfigport.h:94
-        #   是 `#ifndef MICROPY_PY_BLUETOOTH / #define ... 1` —— 蓝牙是**硬开**的。
-        #   IDF 的 NimBLE 库没了之后, mpnimbleport.c 照样 include esp_nimble_hci.h
-        #   → fatal error: esp_nimble_hci.h: No such file or directory。
-        #   这里从命令行把宏压成 0 (mpconfigport 的 #ifndef 尊重它),
-        #   mpnimbleport.c 与 extmod/nimble/modbluetooth_nimble.c 的函数体随之整段消失。
-        idf_build_set_property(COMPILE_OPTIONS "-DMICROPY_PY_BLUETOOTH=0" APPEND)
     endif()
+
+    # esp32 台架的蓝牙是在 patches/0002-*.patch 里关的 (mpconfigport.h 跟随
+    # CONFIG_BT_ENABLED)。不要改成这里的 -D: qstr 预处理是独立自定义命令,
+    # 不吃 IDF 的 COMPILE_OPTIONS, 只有改头文件才两条路径都生效。
 
 else()
     # 模式 B: 首次 set-target（组件尚未下载）
